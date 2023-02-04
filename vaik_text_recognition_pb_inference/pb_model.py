@@ -6,7 +6,8 @@ import json
 
 
 class PbModel:
-    def __init__(self, input_saved_model_dir_path: str = None, classes: Tuple = None, feature_divide_num=16, blank_index=0):
+    def __init__(self, input_saved_model_dir_path: str = None, classes: Tuple = None,
+                 feature_divide_num=16, blank_index=0, top_paths=10):
         self.model = tf.saved_model.load(input_saved_model_dir_path)
         self.model_input_shape = self.model.signatures["serving_default"].inputs[0].shape
         self.model_input_dtype = self.model.signatures["serving_default"].inputs[0].dtype
@@ -15,14 +16,15 @@ class PbModel:
         self.classes = classes
         self.feature_divide_num = feature_divide_num
         self.blank_index = blank_index
+        self.top_paths = top_paths
 
-    def inference(self, input_image_list: List[np.ndarray], batch_size: int = 8) -> Tuple[List[Dict], Tuple[np.ndarray, np.ndarray, List[str]]]:
+    def inference(self, input_image_list: List[np.ndarray], batch_size: int = 8) -> Tuple[List, List]:
         resized_image_array = self.__preprocess_image_list(input_image_list, self.model_input_shape[1:3])
-        raw_pred = self.__inference(resized_image_array, batch_size)
-        output = self.__output_parse(raw_pred)
-        return output, raw_pred
+        raw_decode_list, raw_prob_list = self.__inference(resized_image_array, batch_size)
+        output = self.__output_parse(raw_decode_list, raw_prob_list)
+        return output, (raw_decode_list, raw_prob_list)
 
-    def __inference(self, resize_input_tensor: np.ndarray, batch_size: int) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    def __inference(self, resize_input_tensor: np.ndarray, batch_size: int) -> Tuple[List, List]:
         if len(resize_input_tensor.shape) != 4:
             raise ValueError('dimension mismatch')
         if not np.issubdtype(resize_input_tensor.dtype, np.uint8):
@@ -30,20 +32,15 @@ class PbModel:
 
         decode_list = []
         prob_list = []
-        labels_list = []
         for index in range(0, resize_input_tensor.shape[0], batch_size):
             batch = resize_input_tensor[index:index + batch_size, :, :, :]
             raw_pred = self.model(tf.cast(batch, self.model_input_dtype))
             decode, log_prob = tf.nn.ctc_beam_search_decoder(tf.transpose(raw_pred, (1, 0, 2)),
                                                          tf.ones((raw_pred.shape[0], ), dtype=tf.int32) * raw_pred.shape[1],
-                                                         top_paths=10)
-            decode = tf.sparse.to_dense(decode[0]).numpy()
-            prob = tf.exp(log_prob).numpy()
-            labels = self.__decode2labels(decode)
+                                                         top_paths=self.top_paths)
             decode_list.append(decode)
-            prob_list.append(prob)
-            labels_list.extend(labels)
-        return np.vstack(decode_list), np.vstack(prob_list), labels_list
+            prob_list.append(tf.exp(log_prob).numpy())
+        return decode_list, prob_list
 
     def __preprocess_image_list(self, input_image_list: List[np.ndarray],
                                 resize_input_shape: Tuple[int, int]) -> np.ndarray:
@@ -75,13 +72,24 @@ class PbModel:
             input_image = self.__resize_upper_width_limit(input_image, resize_input_shape[1])
         return input_image
 
-    def __output_parse(self, pred) -> List[Dict]:
+    def __output_parse(self, decode_list, prob_list) -> List[Dict]:
         output_dict_list = []
-        for index in range(pred[0].shape[0]):
-            output_dict = {'text': pred[2][index],
-                           'labels': pred[0][index],
-                           'scores': pred[1][index]}
-            output_dict_list.append(output_dict)
+        for batch_index in range(len(decode_list)):
+            for data_index in range(prob_list[batch_index].shape[0]):
+                text_list = []
+                classes_list = []
+                scores_list = []
+                for candidate_index in range(len(decode_list[batch_index])):
+                    decode = tf.sparse.to_dense(decode_list[batch_index][candidate_index]).numpy()[data_index].tolist()
+                    text = self.__decode2labels(decode)
+                    prob = prob_list[batch_index][data_index][candidate_index]
+                    text_list.append(text)
+                    classes_list.append(decode)
+                    scores_list.append(prob)
+                output_dict = {'text': text_list,
+                               'classes': classes_list,
+                               'scores': scores_list}
+                output_dict_list.append(output_dict)
         return output_dict_list
 
     @classmethod
@@ -105,12 +113,9 @@ class PbModel:
         return np_image
 
     def __decode2labels(self, decode):
-        labels_list = []
-        for decode_index in range(decode.shape[0]):
-            labels = ""
-            for label_index in decode[decode_index]:
-                if label_index == self.blank_index:
-                    continue
-                labels += self.classes[label_index]
-            labels_list.append(labels)
-        return labels_list
+        labels = ""
+        for label_index in decode:
+            if label_index == self.blank_index:
+                continue
+            labels += self.classes[label_index]
+        return labels
