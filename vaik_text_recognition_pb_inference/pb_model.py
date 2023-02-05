@@ -6,7 +6,7 @@ import json
 
 class PbModel:
     def __init__(self, input_saved_model_dir_path: str = None, classes: Tuple = None,
-                 feature_divide_num=16, blank_index=0, top_paths=10):
+                 feature_divide_num=16, blank_index=0, top_paths=10, beam_width=10):
         self.model = tf.saved_model.load(input_saved_model_dir_path)
         self.model_input_shape = self.model.signatures["serving_default"].inputs[0].shape
         self.model_input_dtype = self.model.signatures["serving_default"].inputs[0].dtype
@@ -16,6 +16,7 @@ class PbModel:
         self.feature_divide_num = feature_divide_num
         self.blank_index = blank_index
         self.top_paths = top_paths
+        self.beam_width = beam_width
 
     def inference(self, input_image_list: List[np.ndarray], batch_size: int = 8) -> Tuple[List, List]:
         resized_image_array = self.__preprocess_image_list(input_image_list, self.model_input_shape[1:3])
@@ -36,7 +37,7 @@ class PbModel:
             raw_pred = self.model(tf.cast(batch, self.model_input_dtype))
             decode, log_prob = tf.nn.ctc_beam_search_decoder(tf.transpose(raw_pred, (1, 0, 2)),
                                                          tf.ones((raw_pred.shape[0], ), dtype=tf.int32) * raw_pred.shape[1],
-                                                         top_paths=self.top_paths)
+                                                         top_paths=self.top_paths, beam_width=self.beam_width)
             decode_list.append(decode)
             prob_list.append(tf.exp(log_prob).numpy())
         return decode_list, prob_list
