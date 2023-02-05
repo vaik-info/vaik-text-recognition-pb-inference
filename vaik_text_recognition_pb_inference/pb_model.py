@@ -84,7 +84,7 @@ class PbModel:
                     prob = prob_list[batch_index][data_index][candidate_index]
                     text_list.append(text)
                     classes_list.append(decode)
-                    scores_list.append(prob)
+                    scores_list.append(float(prob))
                 output_dict = {'text': text_list,
                                'classes': classes_list,
                                'scores': scores_list}
