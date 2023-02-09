@@ -6,15 +6,15 @@ import json
 
 class PbModel:
     def __init__(self, input_saved_model_dir_path: str = None, classes: Tuple = None,
-                 feature_divide_num=16, blank_index=0, top_paths=10, beam_width=10):
+                 feature_divide_num=16, top_paths=10, beam_width=10):
         self.model = tf.saved_model.load(input_saved_model_dir_path)
         self.model_input_shape = self.model.signatures["serving_default"].inputs[0].shape
         self.model_input_dtype = self.model.signatures["serving_default"].inputs[0].dtype
         self.model_output_shape = self.model.signatures["serving_default"].outputs[0].shape
         self.model_output_dtype = self.model.signatures["serving_default"].outputs[0].dtype
         self.classes = classes
+        self.blank_index = len(classes)-1
         self.feature_divide_num = feature_divide_num
-        self.blank_index = blank_index
         self.top_paths = top_paths
         self.beam_width = beam_width
 
@@ -36,8 +36,8 @@ class PbModel:
             batch = resize_input_tensor[index:index + batch_size, :, :, :]
             raw_pred = self.model(tf.cast(batch, self.model_input_dtype))
             decode, log_prob = tf.nn.ctc_beam_search_decoder(tf.transpose(raw_pred, (1, 0, 2)),
-                                                         tf.ones((raw_pred.shape[0], ), dtype=tf.int32) * raw_pred.shape[1],
-                                                         top_paths=self.top_paths, beam_width=self.beam_width)
+                                                             tf.ones((raw_pred.shape[0], ), dtype=tf.int32) * raw_pred.shape[1],
+                                                             top_paths=self.top_paths, beam_width=self.beam_width)
             decode_list.append(decode)
             prob_list.append(tf.exp(log_prob).numpy())
         return decode_list, prob_list
@@ -49,9 +49,9 @@ class PbModel:
             resized_image = self.__preprocess_image(input_image, resize_input_shape)
             if resize_input_shape[1] is None:
                 resized_image = tf.image.pad_to_bounding_box(resized_image, 0, 0, max(1, resize_input_shape[0]),
-                                                            max(1, resized_image.shape[1] + (
-                                                                    self.feature_divide_num - resized_image.shape[
-                                                                1] % self.feature_divide_num))).numpy().astype(np.uint8)
+                                                             max(1, resized_image.shape[1] + (
+                                                                     self.feature_divide_num - resized_image.shape[
+                                                                 1] % self.feature_divide_num))).numpy().astype(np.uint8)
             resized_image_list.append(resized_image)
         max_height = max([image.shape[0] for image in resized_image_list])
         max_width = max([image.shape[1] for image in resized_image_list])
