@@ -13,7 +13,7 @@ class PbModel:
         self.model_output_shape = self.model.signatures["serving_default"].outputs[0].shape
         self.model_output_dtype = self.model.signatures["serving_default"].outputs[0].dtype
         self.classes = classes
-        self.blank_index = len(classes)
+        self.blank_index = len(classes)-1
         self.feature_divide_num = feature_divide_num
         self.top_paths = top_paths
         self.beam_width = beam_width
