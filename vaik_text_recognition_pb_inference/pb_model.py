@@ -6,7 +6,7 @@ import json
 
 class PbModel:
     def __init__(self, input_saved_model_dir_path: str = None, classes: Tuple = None,
-                 feature_divide_num=16, top_paths=10, beam_width=10):
+                 feature_divide_num=16, top_paths=10, beam_width=10, softmax_threshold=0.05):
         self.model = tf.saved_model.load(input_saved_model_dir_path)
         self.model_input_shape = self.model.signatures["serving_default"].inputs[0].shape
         self.model_input_dtype = self.model.signatures["serving_default"].inputs[0].dtype
@@ -17,6 +17,7 @@ class PbModel:
         self.feature_divide_num = feature_divide_num
         self.top_paths = top_paths
         self.beam_width = beam_width
+        self.softmax_threshold = softmax_threshold
 
     def inference(self, input_image_list: List[np.ndarray], batch_size: int = 8) -> Tuple[List, List]:
         resized_image_array = self.__preprocess_image_list(input_image_list, self.model_input_shape[1:3])
@@ -34,10 +35,8 @@ class PbModel:
         prob_list = []
         for index in range(0, resize_input_tensor.shape[0], batch_size):
             batch = resize_input_tensor[index:index + batch_size, :, :, :]
-            raw_pred = self.model(tf.cast(batch, self.model_input_dtype))
-            decode, log_prob = tf.nn.ctc_beam_search_decoder(tf.transpose(raw_pred, (1, 0, 2)),
-                                                             tf.ones((raw_pred.shape[0], ), dtype=tf.int32) * raw_pred.shape[1],
-                                                             top_paths=self.top_paths, beam_width=self.beam_width)
+            raw_pred = self.model(tf.cast(batch, self.model_input_dtype)).numpy()
+            decode, log_prob = self.__decode(raw_pred)
             decode_list.append(decode)
             prob_list.append(tf.exp(log_prob).numpy())
         return decode_list, prob_list
@@ -112,6 +111,21 @@ class PbModel:
             np_image = tf.image.resize(np_image, (resize_height, resize_width)).numpy()
         return np_image
 
+    def __decode(self, raw_pred):
+        threshold_pred = np.copy(raw_pred)
+        threshold_pred_min, threshold_pred_max = np.min(threshold_pred), np.max(threshold_pred)
+        threshold_blank_max = np.max(threshold_pred[:, :, -1])
+
+        threshold_pred_softmax = tf.nn.softmax((raw_pred - threshold_pred_min + threshold_pred_max)).numpy()
+        threshold_pred[threshold_pred_softmax < self.softmax_threshold] = threshold_pred_min
+        for batch_index in range(raw_pred.shape[0]):
+            for width_index in range(raw_pred.shape[1]):
+                if np.max(threshold_pred[batch_index, width_index, :]) == threshold_pred_min:
+                    threshold_pred[batch_index, width_index, self.blank_index] = threshold_blank_max
+        decode, log_prob = tf.nn.ctc_beam_search_decoder(tf.transpose(threshold_pred, (1, 0, 2)),
+                                                         tf.ones((threshold_pred.shape[0], ), dtype=tf.int32) * threshold_pred.shape[1],
+                                                         top_paths=self.top_paths, beam_width=self.beam_width)
+        return decode, log_prob
     def __decode2labels(self, decode):
         labels = ""
         for label_index in decode:
