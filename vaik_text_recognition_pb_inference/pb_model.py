@@ -20,23 +20,23 @@ class PbModel:
         self.softmax_threshold = softmax_threshold
 
     def inference(self, input_image_list: List[np.ndarray], batch_size: int = 8) -> Tuple[List, List]:
-        resized_image_array = self.__preprocess_image_list(input_image_list, self.model_input_shape[1:3])
-        raw_decode_list, raw_prob_list = self.__inference(resized_image_array, batch_size)
+        resized_image_array, sequence_length_list = self.__preprocess_image_list(input_image_list, self.model_input_shape[1:3])
+        raw_decode_list, raw_prob_list = self.__inference(resized_image_array, sequence_length_list, batch_size)
         output = self.__output_parse(raw_decode_list, raw_prob_list)
         return output, (raw_decode_list, raw_prob_list)
 
-    def __inference(self, resize_input_tensor: np.ndarray, batch_size: int) -> Tuple[List, List]:
+    def __inference(self, resize_input_tensor: np.ndarray, sequence_length_list: List[int], batch_size: int) -> Tuple[List, List]:
         if len(resize_input_tensor.shape) != 4:
             raise ValueError('dimension mismatch')
         if not np.issubdtype(resize_input_tensor.dtype, np.uint8):
             raise ValueError(f'dtype mismatch expected: {np.uint8}, actual: {resize_input_tensor.dtype}')
-
         decode_list = []
         prob_list = []
         for index in range(0, resize_input_tensor.shape[0], batch_size):
             batch = resize_input_tensor[index:index + batch_size, :, :, :]
+            batch_sequence_length_list = sequence_length_list[index:index + batch_size]
             raw_pred = self.model(tf.cast(batch, self.model_input_dtype)).numpy()
-            decode, log_prob = self.__decode(raw_pred)
+            decode, log_prob = self.__decode(raw_pred, batch_sequence_length_list)
             decode_list.append(decode)
             prob_list.append(tf.exp(log_prob).numpy())
         return decode_list, prob_list
@@ -44,6 +44,7 @@ class PbModel:
     def __preprocess_image_list(self, input_image_list: List[np.ndarray],
                                 resize_input_shape: Tuple[int, int]) -> np.ndarray:
         resized_image_list = []
+        sequence_length_list = []
         for input_image in input_image_list:
             resized_image = self.__preprocess_image(input_image, resize_input_shape)
             if resize_input_shape[1] is None:
@@ -52,13 +53,14 @@ class PbModel:
                                                                      self.feature_divide_num - resized_image.shape[
                                                                  1] % self.feature_divide_num))).numpy().astype(np.uint8)
             resized_image_list.append(resized_image)
+            sequence_length_list.append(resized_image.shape[1]//self.feature_divide_num)
         max_height = max([image.shape[0] for image in resized_image_list])
         max_width = max([image.shape[1] for image in resized_image_list])
         max_ch = max([image.shape[2] for image in resized_image_list])
         canvas_array = np.zeros((len(input_image_list), max_height, max_width, max_ch), dtype=resized_image_list[0].dtype)
         for index, image in enumerate(resized_image_list):
             canvas_array[index, :image.shape[0], :image.shape[1], :image.shape[2]] = image
-        return canvas_array
+        return canvas_array, sequence_length_list
 
     def __preprocess_image(self, input_image: np.ndarray, resize_input_shape: Tuple[int, int]) -> Tuple[
         np.ndarray, Tuple[float, float]]:
@@ -79,7 +81,7 @@ class PbModel:
                 classes_list = []
                 scores_list = []
                 for candidate_index in range(len(decode_list[batch_index])):
-                    decode = tf.sparse.to_dense(decode_list[batch_index][candidate_index]).numpy()[data_index].tolist()
+                    decode = tf.sparse.to_dense(decode_list[batch_index][candidate_index], default_value=self.blank_index).numpy()[data_index].tolist()
                     text = self.__decode2labels(decode)
                     prob = prob_list[batch_index][data_index][candidate_index]
                     text_list.append(text)
@@ -111,19 +113,21 @@ class PbModel:
             np_image = tf.image.resize(np_image, (resize_height, resize_width)).numpy()
         return np_image
 
-    def __decode(self, raw_pred):
+    def __decode(self, raw_pred, sequence_length_list):
         threshold_pred = np.copy(raw_pred)
         threshold_pred_min, threshold_pred_max = np.min(threshold_pred), np.max(threshold_pred)
         threshold_blank_max = np.max(threshold_pred[:, :, -1])
 
         threshold_pred_softmax = tf.nn.softmax((raw_pred - threshold_pred_min + threshold_pred_max)).numpy()
+        a = np.argmax(threshold_pred_softmax, axis=-1)
         threshold_pred[threshold_pred_softmax < self.softmax_threshold] = threshold_pred_min
         for batch_index in range(raw_pred.shape[0]):
             for width_index in range(raw_pred.shape[1]):
                 if np.max(threshold_pred[batch_index, width_index, :]) == threshold_pred_min:
                     threshold_pred[batch_index, width_index, self.blank_index] = threshold_blank_max
+
         decode, log_prob = tf.nn.ctc_beam_search_decoder(tf.transpose(threshold_pred, (1, 0, 2)),
-                                                         tf.ones((threshold_pred.shape[0], ), dtype=tf.int32) * threshold_pred.shape[1],
+                                                         tf.convert_to_tensor(sequence_length_list, dtype=tf.int32),
                                                          top_paths=self.top_paths, beam_width=self.beam_width)
         return decode, log_prob
     def __decode2labels(self, decode):
