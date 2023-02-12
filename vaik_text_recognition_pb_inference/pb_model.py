@@ -119,7 +119,6 @@ class PbModel:
         threshold_blank_max = np.max(threshold_pred[:, :, -1])
 
         threshold_pred_softmax = tf.nn.softmax((raw_pred - threshold_pred_min + threshold_pred_max)).numpy()
-        a = np.argmax(threshold_pred_softmax, axis=-1)
         threshold_pred[threshold_pred_softmax < self.softmax_threshold] = threshold_pred_min
         for batch_index in range(raw_pred.shape[0]):
             for width_index in range(raw_pred.shape[1]):
